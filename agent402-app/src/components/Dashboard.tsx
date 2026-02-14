@@ -1754,7 +1754,7 @@ const Dashboard: React.FC = () => {
         )}
 
         {activeTab === 'api' && (
-          <div style={{ 
+          <div style={{
             padding: isMobile ? '16px' : '20px 40px 20px 20px',
             width: '100%',
             boxSizing: 'border-box'
@@ -1767,57 +1767,198 @@ const Dashboard: React.FC = () => {
             }}>
               API
             </h1>
-            {/* Export Private Key Card */}
-            <div style={{
-              background: '#fff',
-              border: '1px solid #e5e7eb',
-              borderRadius: '12px',
-              padding: isMobile ? '20px' : '24px',
-              maxWidth: '480px'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '640px' }}>
+
+              {/* Section 1: Integrate Agent402 with x402 */}
+              <div style={{
+                background: '#fff',
+                border: '1px solid #e5e7eb',
+                borderRadius: '12px',
+                padding: isMobile ? '20px' : '24px',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                  <div style={{
+                    width: '40px',
+                    height: '40px',
+                    borderRadius: '10px',
+                    background: '#f3f4f6',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M16 18l2-2-2-2" /><path d="M8 6L6 8l2 2" />
+                      <path d="M14.5 4l-5 16" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: '#000' }}>
+                      Integrate Agent402 with your x402 API
+                    </h3>
+                    <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#6b7280' }}>
+                      Accept payments via the x402 protocol using your Agent402 wallet
+                    </p>
+                  </div>
+                </div>
+
+                <p style={{ fontSize: '13px', color: '#6b7280', margin: '0 0 16px 0', lineHeight: '1.5' }}>
+                  To receive x402 payments, set your Agent402 wallet address as the payment recipient in your x402 server configuration. All payments will be routed to your Agent402 wallet automatically.
+                </p>
+
+                {/* Wallet address display */}
                 <div style={{
-                  width: '40px',
-                  height: '40px',
-                  borderRadius: '10px',
-                  background: '#f3f4f6',
+                  background: '#f9fafb',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: '8px',
+                  padding: '12px 14px',
+                  marginBottom: '16px',
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: '20px'
+                  justifyContent: 'space-between',
+                  gap: '8px',
                 }}>
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
-                  </svg>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: '11px', color: '#6b7280', marginBottom: '4px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                      Your Agent402 Wallet Address
+                    </div>
+                    <div style={{
+                      fontSize: '13px',
+                      fontFamily: 'monospace',
+                      color: '#111827',
+                      wordBreak: 'break-all',
+                    }}>
+                      {getWalletAddress() || 'No wallet connected'}
+                    </div>
+                  </div>
+                  {getWalletAddress() && (
+                    <button
+                      onClick={() => copyToClipboard(getWalletAddress()!)}
+                      style={{
+                        flexShrink: 0,
+                        padding: '6px 10px',
+                        background: '#fff',
+                        border: '1px solid #d1d5db',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        color: '#374151',
+                        cursor: 'pointer',
+                        fontWeight: '500',
+                      }}
+                    >
+                      Copy
+                    </button>
+                  )}
                 </div>
-                <div>
-                  <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: '#000' }}>
-                    Export Private Key
-                  </h3>
-                  <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#6b7280' }}>
-                    Export your embedded wallet's private key
-                  </p>
+
+                {/* Code snippet */}
+                <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '8px', fontWeight: '500' }}>
+                  Example: Node.js / Express with x402
+                </div>
+                <div style={{
+                  background: '#1e1e1e',
+                  borderRadius: '8px',
+                  padding: '16px',
+                  overflowX: 'auto',
+                }}>
+                  <pre style={{
+                    margin: 0,
+                    fontSize: '13px',
+                    lineHeight: '1.6',
+                    fontFamily: '"SF Mono", "Fira Code", "Fira Mono", Menlo, monospace',
+                    color: '#d4d4d4',
+                    whiteSpace: 'pre',
+                    tabSize: 2,
+                  }}>{`import express from "express";
+import { paymentMiddleware } from "x402-express";
+
+const app = express();
+
+app.use(
+  paymentMiddleware({
+    // Paste your Agent402 wallet address below
+    payTo: "${getWalletAddress() || '0xYOUR_AGENT402_WALLET_ADDRESS'}",
+    network: "base",
+  })
+);
+
+app.get("/api/resource", (req, res) => {
+  res.json({ data: "paid content" });
+});
+
+app.listen(4021);`}</pre>
+                </div>
+
+                <div style={{
+                  marginTop: '16px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontSize: '13px',
+                }}>
+                  <span style={{ color: '#6b7280' }}>Full documentation:</span>
+                  <a
+                    href="https://docs.cdp.coinbase.com/x402/quickstart-for-sellers"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: '#2563eb', textDecoration: 'none', fontWeight: '500' }}
+                  >
+                    Coinbase x402 for Sellers
+                  </a>
                 </div>
               </div>
-              <p style={{ fontSize: '13px', color: '#6b7280', margin: '0 0 16px 0', lineHeight: '1.5' }}>
-                This will open a secure modal where you can view and copy your private key. Never share your private key with anyone.
-              </p>
-              <button
-                onClick={() => exportWallet()}
-                style={{
-                  width: '100%',
-                  padding: '10px 16px',
-                  background: '#000',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '8px',
-                  fontSize: '14px',
-                  fontWeight: '500',
-                  cursor: 'pointer'
-                }}
-              >
-                Export Private Key
-              </button>
+
+              {/* Section 2: Export Private Key */}
+              <div style={{
+                background: '#fff',
+                border: '1px solid #e5e7eb',
+                borderRadius: '12px',
+                padding: isMobile ? '20px' : '24px',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                  <div style={{
+                    width: '40px',
+                    height: '40px',
+                    borderRadius: '10px',
+                    background: '#f3f4f6',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: '#000' }}>
+                      Export Private Key
+                    </h3>
+                    <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#6b7280' }}>
+                      Export your embedded wallet's private key
+                    </p>
+                  </div>
+                </div>
+                <p style={{ fontSize: '13px', color: '#6b7280', margin: '0 0 16px 0', lineHeight: '1.5' }}>
+                  This will open a secure modal where you can view and copy your private key. Never share your private key with anyone.
+                </p>
+                <button
+                  onClick={() => exportWallet()}
+                  style={{
+                    width: '100%',
+                    padding: '10px 16px',
+                    background: '#000',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '8px',
+                    fontSize: '14px',
+                    fontWeight: '500',
+                    cursor: 'pointer'
+                  }}
+                >
+                  Export Private Key
+                </button>
+              </div>
+
             </div>
           </div>
         )}
