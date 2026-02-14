@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
-import { usePrivy } from '@privy-io/react-auth';
+import { usePrivy, useWallets, useSendTransaction } from '@privy-io/react-auth';
 import { createPublicClient, http } from 'viem';
 import { base } from 'viem/chains';
 import './Dashboard.css';
-import { getUserPaymentData, formatCurrency, PaymentRecord } from '../lib/supabase';
+import { getUserPaymentData, formatCurrency, PaymentRecord, OfframpSetting, getOfframpSettings, upsertOfframpSetting, deleteOfframpSetting, OfframpOrder, insertOfframpOrder, getOfframpOrders, updateOfframpOrder } from '../lib/supabase';
 import { logout as clearAuth } from './ProtectedRoute';
 
 const Dashboard: React.FC = () => {
@@ -21,6 +21,8 @@ const Dashboard: React.FC = () => {
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [showTransferCryptoModal, setShowTransferCryptoModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [showCryptoWithdrawModal, setShowCryptoWithdrawModal] = useState(false);
+  const [showFiatWithdrawModal, setShowFiatWithdrawModal] = useState(false);
   const [showTopUpModal, setShowTopUpModal] = useState(false);
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [withdrawAddress, setWithdrawAddress] = useState('');
@@ -29,10 +31,30 @@ const Dashboard: React.FC = () => {
   const [isTopUpLoading, setIsTopUpLoading] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [showMobileSidebar, setShowMobileSidebar] = useState(false);
+  // Offramp state
+  const [offrampSettings, setOfframpSettings] = useState<OfframpSetting[]>([]);
+  const [isLoadingOfframp, setIsLoadingOfframp] = useState(false);
+  const [showAddPaymentMethod, setShowAddPaymentMethod] = useState(false);
+  const [editingProcessor, setEditingProcessor] = useState<string | null>(null);
+  const [pmProcessor, setPmProcessor] = useState<'venmo' | 'zelle'>('venmo');
+  const [pmIdentifier, setPmIdentifier] = useState('');
+  const [pmConversionRate, setPmConversionRate] = useState('1.02');
+  const [isSavingPm, setIsSavingPm] = useState(false);
+  const [offrampAmount, setOfframpAmount] = useState('');
+  const [selectedProcessor, setSelectedProcessor] = useState('');
+  const [isOfframping, setIsOfframping] = useState(false);
+  const [offrampStatus, setOfframpStatus] = useState<string | null>(null);
+  const [offrampOrders, setOfframpOrders] = useState<OfframpOrder[]>([]);
+  const [selectedOrder, setSelectedOrder] = useState<OfframpOrder | null>(null);
+  const [showOrderDetailModal, setShowOrderDetailModal] = useState(false);
+  const [isRefreshingOrder, setIsRefreshingOrder] = useState(false);
+  const [isLoadingOrders, setIsLoadingOrders] = useState(false);
   const { ready, authenticated, user, login, logout } = usePrivy();
+  const { wallets } = useWallets();
+  const { sendTransaction } = useSendTransaction();
 
   const getWalletAddress = () => {
-    return user?.wallet?.address;
+    return user?.wallet?.address ?? null;
   };
 
   const copyToClipboard = (text: string) => {
@@ -139,6 +161,217 @@ const Dashboard: React.FC = () => {
     }
   };
 
+  // Fetch offramp settings
+  const fetchOfframpSettings = async () => {
+    const walletAddr = getWalletAddress();
+    if (!walletAddr) return;
+    setIsLoadingOfframp(true);
+    try {
+      const settings = await getOfframpSettings(walletAddr);
+      setOfframpSettings(settings);
+      if (settings.length > 0 && !selectedProcessor) {
+        setSelectedProcessor(settings[0].processor);
+      }
+    } catch (error) {
+      console.error('Error fetching offramp settings:', error);
+    } finally {
+      setIsLoadingOfframp(false);
+    }
+  };
+
+  const fetchOfframpOrders = async () => {
+    const walletAddr = getWalletAddress();
+    if (!walletAddr) return;
+    setIsLoadingOrders(true);
+    try {
+      const orders = await getOfframpOrders(walletAddr);
+      setOfframpOrders(orders);
+    } catch (error) {
+      console.error('Error fetching offramp orders:', error);
+    } finally {
+      setIsLoadingOrders(false);
+    }
+  };
+
+  const handleSavePaymentMethod = async () => {
+    const walletAddr = getWalletAddress();
+    if (!walletAddr || !pmIdentifier.trim()) return;
+    setIsSavingPm(true);
+    try {
+      const success = await upsertOfframpSetting(walletAddr, pmProcessor, pmIdentifier.trim(), pmConversionRate);
+      if (success) {
+        await fetchOfframpSettings();
+        setShowAddPaymentMethod(false);
+        setEditingProcessor(null);
+        setPmIdentifier('');
+        setPmConversionRate('1.02');
+        setToastMessage('Payment method saved!');
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 2000);
+      }
+    } catch (error) {
+      console.error('Error saving payment method:', error);
+    } finally {
+      setIsSavingPm(false);
+    }
+  };
+
+  const handleDeletePaymentMethod = async (processor: string) => {
+    const walletAddr = getWalletAddress();
+    if (!walletAddr) return;
+    const success = await deleteOfframpSetting(walletAddr, processor);
+    if (success) {
+      await fetchOfframpSettings();
+      setToastMessage('Payment method removed!');
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 2000);
+    }
+  };
+
+  const handleEditPaymentMethod = (setting: OfframpSetting) => {
+    setPmProcessor(setting.processor as 'venmo' | 'zelle');
+    setPmIdentifier(setting.identifier);
+    setPmConversionRate(setting.conversion_rate);
+    setEditingProcessor(setting.processor);
+    setShowAddPaymentMethod(true);
+  };
+
+  const handleWithdraw = async () => {
+    const walletAddr = getWalletAddress();
+    if (!walletAddr || !offrampAmount || !selectedProcessor) return;
+
+    const setting = offrampSettings.find(s => s.processor === selectedProcessor);
+    if (!setting) return;
+
+    setIsOfframping(true);
+    setOfframpStatus('Initiating withdrawal...');
+    try {
+      const embeddedWallet = wallets.find(w => w.walletClientType === 'privy');
+      if (!embeddedWallet) throw new Error('Embedded wallet not found');
+
+      const provider = await embeddedWallet.getEthereumProvider();
+      const { createWalletClient: createWC, custom, parseUnits } = await import('viem');
+      const { base } = await import('viem/chains');
+      const { OfframpClient, Currency } = await import('@zkp2p/sdk');
+
+      // Custom transport: intercept eth_sendTransaction to use Privy's
+      // sponsored sendTransaction, forward everything else to the provider
+      const walletClient = createWC({
+        account: walletAddr as `0x${string}`,
+        chain: base,
+        transport: custom({
+          async request({ method, params }: { method: string; params: any }) {
+            if (method === 'eth_sendTransaction') {
+              const tx = Array.isArray(params) ? params[0] : params;
+              const receipt = await sendTransaction(
+                { to: tx.to, data: tx.data, value: tx.value },
+                { sponsor: true }
+              );
+              return receipt.hash;
+            }
+            return provider.request({ method, params });
+          },
+        }),
+      });
+
+      const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
+      const zkp2pApiKey = import.meta.env.VITE_ZKP2P_API_KEY || '';
+
+      const offrampClient = new OfframpClient({
+        apiKey: zkp2pApiKey,
+        walletClient: walletClient as any,
+        chainId: base.id,
+      });
+
+      const depositAmount = parseUnits(offrampAmount, 6);
+
+      setOfframpStatus('Approving USDC allowance...');
+      const allowanceResult = await offrampClient.ensureAllowance({
+        token: USDC_BASE,
+        amount: depositAmount,
+      });
+
+      // Wait for approval tx to be mined before creating deposit
+      if (allowanceResult?.hash) {
+        setOfframpStatus('Waiting for approval to confirm...');
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      }
+
+      setOfframpStatus('Creating deposit...');
+
+      // Build processor-specific depositData
+      const depositDataKey = setting.processor === 'venmo' ? 'venmoUsername' : 'zelleUsername';
+
+      // Convert conversion rate to 18-decimal format (e.g. 1.02 → '1020000000000000000')
+      const rateFloat = parseFloat(setting.conversion_rate);
+      const rate18 = parseUnits(rateFloat.toFixed(18), 18).toString();
+
+      const deposit = await offrampClient.createDeposit({
+        token: USDC_BASE,
+        amount: depositAmount,
+        intentAmountRange: { min: BigInt(100000), max: depositAmount },
+        processorNames: [setting.processor],
+        depositData: [{ [depositDataKey]: setting.identifier }],
+        conversionRates: [[{ currency: Currency.USD, conversionRate: rate18 }]],
+      });
+
+      const txHash = deposit?.hash || '';
+      setOfframpStatus(`Withdrawal initiated! Tx: ${txHash.slice(0, 10)}...`);
+
+      // Save order to Supabase
+      const newOrder = await insertOfframpOrder({
+        wallet_address: walletAddr,
+        deposit_id: '',
+        tx_hash: txHash,
+        amount: parseFloat(offrampAmount),
+        processor: setting.processor,
+        identifier: setting.identifier,
+        conversion_rate: setting.conversion_rate,
+        status: 'pending',
+        intent_hashes: [],
+      });
+      if (newOrder) {
+        setOfframpOrders(prev => [newOrder, ...prev]);
+      }
+
+      setOfframpAmount('');
+      setToastMessage('Withdrawal initiated!');
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 2000);
+    } catch (error) {
+      setOfframpStatus(`Error: ${(error as Error).message}`);
+    } finally {
+      setIsOfframping(false);
+    }
+  };
+
+  // Execute USDC transfer via Privy sendTransaction (gas sponsored)
+  const executeUsdcTransfer = async (
+    amount: number,
+    destinationAddress: string
+  ): Promise<string> => {
+    const { parseUnits, encodeFunctionData } = await import('viem');
+
+    const walletAddr = getWalletAddress();
+    if (!walletAddr) throw new Error('Wallet address not available');
+
+    const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+    const transferAmount = parseUnits(amount.toString(), 6);
+
+    const data = encodeFunctionData({
+      abi: erc20ABI,
+      functionName: 'transfer',
+      args: [destinationAddress as `0x${string}`, transferAmount],
+    });
+
+    const receipt = await sendTransaction(
+      { to: USDC_BASE as `0x${string}`, data },
+      { sponsor: true }
+    );
+
+    return receipt.hash;
+  };
+
   // Manual refresh function
   const refreshBalance = () => {
     const walletAddress = getWalletAddress();
@@ -149,20 +382,35 @@ const Dashboard: React.FC = () => {
 
 
 
-  // Withdrawal function (connected wallet functionality removed)
-  const executeGaslessWithdrawal = async (
-    amount: number,
-    destinationAddress: string
-  ): Promise<string> => {
-    throw new Error('Gasless withdrawals require connected wallet functionality. Please use your connected wallet to transfer funds directly.');
-  };
-
-  // Fetch balance and payment data when wallet addresses change
+  // Register embedded wallet address in Supabase on login
   React.useEffect(() => {
-    const walletAddress = getWalletAddress();
-    if (walletAddress) {
+    const registerWallet = async () => {
+      const walletAddr = user?.wallet?.address;
+      if (!user?.id || !walletAddr) return;
+
+      try {
+        const apiBase = import.meta.env.VITE_API_URL || '';
+        await fetch(`${apiBase}/wallets/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ privyUserId: user.id, walletAddress: walletAddr }),
+        });
+      } catch (error) {
+        console.error('Wallet register error:', error);
+      }
+    };
+
+    registerWallet();
+  }, [user?.id, user?.wallet?.address]);
+
+  // Fetch balance and payment data when wallet address is available
+  React.useEffect(() => {
+    const walletAddr = user?.wallet?.address;
+    if (walletAddr) {
       fetchAllWalletBalances();
       fetchPaymentData();
+      fetchOfframpSettings();
+      fetchOfframpOrders();
     }
   }, [user?.wallet?.address]);
 
@@ -314,10 +562,10 @@ const Dashboard: React.FC = () => {
   // Show loading state while Privy is initializing
   if (!ready) {
     return (
-      <div style={{ 
-        display: 'flex', 
-        justifyContent: 'center', 
-        alignItems: 'center', 
+      <div style={{
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
         height: '100vh',
         backgroundColor: '#ffffff'
       }}>
@@ -552,6 +800,28 @@ const Dashboard: React.FC = () => {
         </button>
 
         <button
+          style={navButtonStyle(activeTab === 'ramp')}
+          onClick={() => setActiveTab('ramp')}
+          onMouseEnter={(e) => {
+            if (activeTab !== 'ramp') {
+              e.currentTarget.style.backgroundColor = '#f5f5f5';
+            }
+          }}
+          onMouseLeave={(e) => {
+            if (activeTab !== 'ramp') {
+              e.currentTarget.style.backgroundColor = 'transparent';
+            }
+          }}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ marginRight: '2px' }}>
+            <path d="M7 10L12 5L17 10" stroke={activeTab === 'ramp' ? '#ffffff' : '#666666'} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M17 14L12 19L7 14" stroke={activeTab === 'ramp' ? '#ffffff' : '#666666'} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <line x1="12" y1="5" x2="12" y2="19" stroke={activeTab === 'ramp' ? '#ffffff' : '#666666'} strokeWidth="1.5" strokeLinecap="round"/>
+          </svg>
+          <span>Ramp</span>
+        </button>
+
+        <button
           style={navButtonStyle(activeTab === 'api')}
           onClick={() => setActiveTab('api')}
           onMouseEnter={(e) => {
@@ -617,8 +887,8 @@ const Dashboard: React.FC = () => {
             </div>
           )}
           <button
-            onClick={() => {
-              logout();
+            onClick={async () => {
+              await logout();
               clearAuth();
             }}
             style={{
@@ -1371,6 +1641,115 @@ const Dashboard: React.FC = () => {
                 )}
               </div>
             </div>
+
+            {/* Order Status Section */}
+            <div style={cardStyle}>
+              <div style={{
+                ...cardTitleStyle,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between'
+              }}>
+                Order Status
+                <button
+                  onClick={fetchOfframpOrders}
+                  disabled={isLoadingOrders}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: isLoadingOrders ? '#ccc' : '#666',
+                    cursor: isLoadingOrders ? 'not-allowed' : 'pointer',
+                    padding: '4px',
+                    borderRadius: '4px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    transition: 'color 0.2s ease',
+                    fontSize: '12px'
+                  }}
+                  onMouseEnter={(e) => { if (!isLoadingOrders) e.currentTarget.style.color = '#000'; }}
+                  onMouseLeave={(e) => { if (!isLoadingOrders) e.currentTarget.style.color = '#666'; }}
+                  title="Refresh order status"
+                >
+                  <svg
+                    width="14" height="14" viewBox="0 0 24 24"
+                    fill="none" stroke="currentColor" strokeWidth="2"
+                    style={{ animation: isLoadingOrders ? 'spin 1s linear infinite' : 'none' }}
+                  >
+                    <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" strokeLinecap="round" strokeLinejoin="round"/>
+                    <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </button>
+              </div>
+              <div style={{
+                marginTop: '16px',
+                border: '1px solid #e5e5e5',
+                borderRadius: '8px',
+                padding: '16px',
+                backgroundColor: '#fafafa',
+                maxHeight: '300px',
+                overflowY: 'auto'
+              }}>
+                {isLoadingOrders ? (
+                  <div style={{ textAlign: 'center', color: '#999', fontSize: '14px', padding: '40px 0' }}>
+                    Loading orders...
+                  </div>
+                ) : offrampOrders.length === 0 ? (
+                  <div style={{ textAlign: 'center', color: '#999', fontSize: '14px', padding: '40px 0' }}>
+                    No withdrawal orders yet
+                    <div style={{ fontSize: '12px', marginTop: '8px' }}>
+                      Fiat withdrawals will appear here once you initiate them from the Ramp tab
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {offrampOrders.map((order) => (
+                      <div
+                        key={order.id}
+                        onClick={() => { setSelectedOrder(order); setShowOrderDetailModal(true); }}
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          padding: '12px',
+                          backgroundColor: '#fff',
+                          borderRadius: '8px',
+                          border: '1px solid #f0f0f0',
+                          cursor: 'pointer',
+                          transition: 'background 0.15s',
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.backgroundColor = '#f9fafb'}
+                        onMouseLeave={e => e.currentTarget.style.backgroundColor = '#fff'}
+                      >
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: '14px', fontWeight: 500, color: '#000', marginBottom: '4px' }}>
+                            {order.amount} USDC → {order.processor}
+                          </div>
+                          <div style={{ fontSize: '11px', color: '#999' }}>
+                            {new Date(order.created_at || '').toLocaleString()}
+                          </div>
+                        </div>
+                        <span style={{
+                          padding: '3px 10px',
+                          borderRadius: '12px',
+                          fontSize: '12px',
+                          fontWeight: 500,
+                          backgroundColor:
+                            order.status === 'pending' ? '#fef3c7' :
+                            order.status === 'active' ? '#dbeafe' :
+                            order.status === 'fulfilled' ? '#d1fae5' : '#f3f4f6',
+                          color:
+                            order.status === 'pending' ? '#92400e' :
+                            order.status === 'active' ? '#1e40af' :
+                            order.status === 'fulfilled' ? '#065f46' : '#6b7280',
+                        }}>
+                          {order.status}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           </>
         )}
 
@@ -1391,7 +1770,570 @@ const Dashboard: React.FC = () => {
             {/* API content will go here */}
           </div>
         )}
+
+        {activeTab === 'ramp' && (
+          <div style={{
+            padding: isMobile ? '16px' : '20px 40px 20px 20px',
+            width: '100%',
+            boxSizing: 'border-box'
+          }}>
+            <h1 style={{
+              fontSize: isMobile ? '24px' : '32px',
+              fontWeight: '600',
+              color: '#000',
+              margin: '0 0 32px 0'
+            }}>
+              Ramp
+            </h1>
+
+            {/* Payment Methods Section */}
+            <div style={{ marginBottom: '32px' }}>
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '16px'
+              }}>
+                <h2 style={{ fontSize: '18px', fontWeight: '600', color: '#000', margin: 0 }}>
+                  Payment Methods
+                </h2>
+                {!showAddPaymentMethod && (
+                  <button
+                    onClick={() => {
+                      setEditingProcessor(null);
+                      setPmProcessor('venmo');
+                      setPmIdentifier('');
+                      setPmConversionRate('1.02');
+                      setShowAddPaymentMethod(true);
+                    }}
+                    style={{
+                      backgroundColor: '#000',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '8px',
+                      padding: '8px 16px',
+                      fontSize: '13px',
+                      fontWeight: '500',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      transition: 'all 0.2s ease'
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#333'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#000'; }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="12" y1="5" x2="12" y2="19" />
+                      <line x1="5" y1="12" x2="19" y2="12" />
+                    </svg>
+                    Add Method
+                  </button>
+                )}
+              </div>
+
+              {/* Add/Edit Payment Method Form */}
+              {showAddPaymentMethod && (
+                <div style={{
+                  ...cardStyle,
+                  border: '2px solid #000',
+                  marginBottom: '16px'
+                }}>
+                  <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#000', margin: '0 0 16px 0' }}>
+                    {editingProcessor ? 'Edit Payment Method' : 'Add Payment Method'}
+                  </h3>
+
+                  <div style={{ marginBottom: '12px' }}>
+                    <label style={{ fontSize: '13px', color: '#666', display: 'block', marginBottom: '4px' }}>Processor</label>
+                    <select
+                      value={pmProcessor}
+                      onChange={(e) => setPmProcessor(e.target.value as 'venmo' | 'zelle')}
+                      disabled={!!editingProcessor}
+                      style={{
+                        width: '100%',
+                        padding: '10px 12px',
+                        border: '1px solid #e5e5e5',
+                        borderRadius: '8px',
+                        fontSize: '14px',
+                        backgroundColor: editingProcessor ? '#f5f5f5' : '#fff',
+                        color: '#000',
+                        outline: 'none'
+                      }}
+                    >
+                      <option value="venmo">Venmo</option>
+                      <option value="zelle">Zelle</option>
+                    </select>
+                  </div>
+
+                  <div style={{ marginBottom: '12px' }}>
+                    <label style={{ fontSize: '13px', color: '#666', display: 'block', marginBottom: '4px' }}>
+                      {pmProcessor === 'venmo' ? 'Venmo Username' : 'Zelle Email'}
+                    </label>
+                    <input
+                      type="text"
+                      value={pmIdentifier}
+                      onChange={(e) => setPmIdentifier(e.target.value)}
+                      placeholder={pmProcessor === 'venmo' ? '@username' : 'email@example.com'}
+                      style={{
+                        width: '100%',
+                        padding: '10px 12px',
+                        border: '1px solid #e5e5e5',
+                        borderRadius: '8px',
+                        fontSize: '14px',
+                        color: '#000',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ fontSize: '13px', color: '#666', display: 'block', marginBottom: '4px' }}>
+                      Conversion Rate (USDC to USD)
+                    </label>
+                    <input
+                      type="text"
+                      value={pmConversionRate}
+                      onChange={(e) => setPmConversionRate(e.target.value)}
+                      placeholder="1.02"
+                      style={{
+                        width: '100%',
+                        padding: '10px 12px',
+                        border: '1px solid #e5e5e5',
+                        borderRadius: '8px',
+                        fontSize: '14px',
+                        color: '#000',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                    <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
+                      1 USDC = {pmConversionRate || '1.02'} USD
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      onClick={handleSavePaymentMethod}
+                      disabled={isSavingPm || !pmIdentifier.trim()}
+                      style={{
+                        flex: 1,
+                        backgroundColor: isSavingPm || !pmIdentifier.trim() ? '#ccc' : '#000',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '8px',
+                        padding: '10px',
+                        fontSize: '14px',
+                        fontWeight: '500',
+                        cursor: isSavingPm || !pmIdentifier.trim() ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      {isSavingPm ? 'Saving...' : 'Save'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowAddPaymentMethod(false);
+                        setEditingProcessor(null);
+                      }}
+                      style={{
+                        padding: '10px 20px',
+                        backgroundColor: 'transparent',
+                        border: '1px solid #e5e5e5',
+                        borderRadius: '8px',
+                        fontSize: '14px',
+                        color: '#666',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Payment Method Cards */}
+              {isLoadingOfframp ? (
+                <div style={{ color: '#999', fontSize: '14px' }}>Loading payment methods...</div>
+              ) : offrampSettings.length === 0 && !showAddPaymentMethod ? (
+                <div style={{
+                  ...cardStyle,
+                  textAlign: 'center',
+                  color: '#999',
+                  padding: '40px 24px'
+                }}>
+                  <div style={{ fontSize: '14px', marginBottom: '8px' }}>No payment methods configured</div>
+                  <div style={{ fontSize: '12px' }}>Add a Venmo or Zelle account to start withdrawing</div>
+                </div>
+              ) : (
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fit, minmax(280px, 1fr))',
+                  gap: '12px'
+                }}>
+                  {offrampSettings.map((setting) => (
+                    <div key={setting.id} style={{
+                      ...cardStyle,
+                      marginBottom: 0,
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'flex-start'
+                    }}>
+                      <div>
+                        <div style={{
+                          fontSize: '14px',
+                          fontWeight: '600',
+                          color: '#000',
+                          marginBottom: '4px',
+                          textTransform: 'capitalize'
+                        }}>
+                          {setting.processor}
+                        </div>
+                        <div style={{ fontSize: '13px', color: '#666', marginBottom: '2px' }}>
+                          {setting.identifier}
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#999' }}>
+                          Rate: 1 USDC = {setting.conversion_rate} USD
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '4px' }}>
+                        <button
+                          onClick={() => handleEditPaymentMethod(setting)}
+                          style={{
+                            background: 'none',
+                            border: '1px solid #e5e5e5',
+                            borderRadius: '6px',
+                            padding: '6px 10px',
+                            fontSize: '12px',
+                            color: '#666',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleDeletePaymentMethod(setting.processor)}
+                          style={{
+                            background: 'none',
+                            border: '1px solid #e5e5e5',
+                            borderRadius: '6px',
+                            padding: '6px 10px',
+                            fontSize: '12px',
+                            color: '#cc0000',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Withdraw Section */}
+            <div>
+              <h2 style={{ fontSize: '18px', fontWeight: '600', color: '#000', marginBottom: '16px' }}>
+                Withdraw USDC
+              </h2>
+              <div style={cardStyle}>
+                {offrampSettings.length === 0 ? (
+                  <div style={{ color: '#999', fontSize: '14px', textAlign: 'center', padding: '20px' }}>
+                    Add a payment method above to withdraw
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ marginBottom: '12px' }}>
+                      <label style={{ fontSize: '13px', color: '#666', display: 'block', marginBottom: '4px' }}>
+                        Payment Method
+                      </label>
+                      <select
+                        value={selectedProcessor}
+                        onChange={(e) => setSelectedProcessor(e.target.value)}
+                        style={{
+                          width: '100%',
+                          padding: '10px 12px',
+                          border: '1px solid #e5e5e5',
+                          borderRadius: '8px',
+                          fontSize: '14px',
+                          backgroundColor: '#fff',
+                          color: '#000',
+                          outline: 'none'
+                        }}
+                      >
+                        {offrampSettings.map((s) => (
+                          <option key={s.processor} value={s.processor}>
+                            {s.processor.charAt(0).toUpperCase() + s.processor.slice(1)} — {s.identifier}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div style={{ marginBottom: '16px' }}>
+                      <label style={{ fontSize: '13px', color: '#666', display: 'block', marginBottom: '4px' }}>
+                        Amount (USDC)
+                      </label>
+                      <input
+                        type="number"
+                        value={offrampAmount}
+                        onChange={(e) => setOfframpAmount(e.target.value)}
+                        placeholder="0.00"
+                        min="0"
+                        step="0.01"
+                        style={{
+                          width: '100%',
+                          padding: '10px 12px',
+                          border: '1px solid #e5e5e5',
+                          borderRadius: '8px',
+                          fontSize: '14px',
+                          color: '#000',
+                          outline: 'none',
+                          boxSizing: 'border-box'
+                        }}
+                      />
+                      {offrampAmount && selectedProcessor && (() => {
+                        const s = offrampSettings.find(s => s.processor === selectedProcessor);
+                        const rate = s ? parseFloat(s.conversion_rate) : 1;
+                        return (
+                          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                            You'll receive ~${(parseFloat(offrampAmount) * rate).toFixed(2)} USD via {selectedProcessor}
+                          </div>
+                        );
+                      })()}
+                    </div>
+
+                    <button
+                      onClick={handleWithdraw}
+                      disabled={isOfframping || !offrampAmount || parseFloat(offrampAmount) <= 0}
+                      style={{
+                        width: '100%',
+                        backgroundColor: isOfframping || !offrampAmount || parseFloat(offrampAmount) <= 0 ? '#ccc' : '#000',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '8px',
+                        padding: '12px',
+                        fontSize: '14px',
+                        fontWeight: '600',
+                        cursor: isOfframping || !offrampAmount || parseFloat(offrampAmount) <= 0 ? 'not-allowed' : 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '8px',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      {isOfframping ? (
+                        <>
+                          <div style={{
+                            width: '16px',
+                            height: '16px',
+                            border: '2px solid #fff',
+                            borderTop: '2px solid transparent',
+                            borderRadius: '50%',
+                            animation: 'spin 1s linear infinite'
+                          }}></div>
+                          Processing...
+                        </>
+                      ) : (
+                        'Withdraw'
+                      )}
+                    </button>
+
+                    {offrampStatus && (
+                      <div style={{
+                        marginTop: '12px',
+                        padding: '10px 12px',
+                        borderRadius: '8px',
+                        fontSize: '13px',
+                        backgroundColor: offrampStatus.startsWith('Error') ? '#fff0f0' : '#f0fff0',
+                        color: offrampStatus.startsWith('Error') ? '#cc0000' : '#006600',
+                        border: `1px solid ${offrampStatus.startsWith('Error') ? '#ffcccc' : '#ccffcc'}`
+                      }}>
+                        {offrampStatus}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+
+          </div>
+        )}
       </div>
+
+      {/* Order Detail Modal */}
+      {showOrderDetailModal && selectedOrder && (
+        <>
+          <div
+            onClick={() => setShowOrderDetailModal(false)}
+            style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+              backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 1000,
+            }}
+          />
+          <div style={{
+            position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+            backgroundColor: '#fff', borderRadius: '16px', padding: '24px',
+            width: '90%', maxWidth: '440px', zIndex: 1001, maxHeight: '80vh', overflowY: 'auto',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h3 style={{ fontSize: '18px', fontWeight: 600, margin: 0 }}>Order Details</h3>
+              <button onClick={() => setShowOrderDetailModal(false)} style={{ background: 'none', border: 'none', fontSize: '20px', cursor: 'pointer', color: '#888' }}>&times;</button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: '#888', fontSize: '13px' }}>Amount</span>
+                <span style={{ fontWeight: 500 }}>{selectedOrder.amount} USDC</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: '#888', fontSize: '13px' }}>Processor</span>
+                <span style={{ fontWeight: 500, textTransform: 'capitalize' }}>{selectedOrder.processor}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: '#888', fontSize: '13px' }}>Identifier</span>
+                <span style={{ fontWeight: 500 }}>{selectedOrder.identifier}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: '#888', fontSize: '13px' }}>Rate</span>
+                <span style={{ fontWeight: 500 }}>{selectedOrder.conversion_rate}x</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ color: '#888', fontSize: '13px' }}>Status</span>
+                <span style={{
+                  padding: '3px 10px', borderRadius: '12px', fontSize: '12px', fontWeight: 500,
+                  backgroundColor:
+                    selectedOrder.status === 'pending' ? '#fef3c7' :
+                    selectedOrder.status === 'active' ? '#dbeafe' :
+                    selectedOrder.status === 'fulfilled' ? '#d1fae5' : '#f3f4f6',
+                  color:
+                    selectedOrder.status === 'pending' ? '#92400e' :
+                    selectedOrder.status === 'active' ? '#1e40af' :
+                    selectedOrder.status === 'fulfilled' ? '#065f46' : '#6b7280',
+                }}>
+                  {selectedOrder.status}
+                </span>
+              </div>
+              {selectedOrder.tx_hash && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ color: '#888', fontSize: '13px' }}>Tx Hash</span>
+                  <a
+                    href={`https://basescan.org/tx/${selectedOrder.tx_hash}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ fontSize: '13px', color: '#2563eb', textDecoration: 'none' }}
+                  >
+                    {selectedOrder.tx_hash.slice(0, 8)}...{selectedOrder.tx_hash.slice(-6)}
+                  </a>
+                </div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: '#888', fontSize: '13px' }}>Created</span>
+                <span style={{ fontSize: '13px' }}>{new Date(selectedOrder.created_at || '').toLocaleString()}</span>
+              </div>
+              {selectedOrder.intent_hashes.length > 0 && (
+                <div>
+                  <span style={{ color: '#888', fontSize: '13px' }}>Intent Hashes</span>
+                  <div style={{ marginTop: '4px', fontSize: '12px', color: '#555', wordBreak: 'break-all' }}>
+                    {selectedOrder.intent_hashes.map((h, i) => <div key={i}>{h}</div>)}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={async () => {
+                if (!selectedOrder?.id) return;
+                setIsRefreshingOrder(true);
+                try {
+                  const embeddedWallet = wallets.find(w => w.walletClientType === 'privy');
+                  if (!embeddedWallet) throw new Error('Embedded wallet not found');
+
+                  const provider = await embeddedWallet.getEthereumProvider();
+                  const { createWalletClient: createWC, custom } = await import('viem');
+                  const { base } = await import('viem/chains');
+                  const { OfframpClient } = await import('@zkp2p/sdk');
+
+                  const walletAddr = getWalletAddress();
+                  const walletClient = createWC({
+                    account: walletAddr as `0x${string}`,
+                    chain: base,
+                    transport: custom({
+                      async request({ method, params }: { method: string; params: any }) {
+                        return provider.request({ method, params });
+                      },
+                    }),
+                  });
+
+                  const zkp2pApiKey = import.meta.env.VITE_ZKP2P_API_KEY || '';
+                  const offrampClient = new OfframpClient({
+                    apiKey: zkp2pApiKey,
+                    walletClient: walletClient as any,
+                    chainId: base.id,
+                  });
+
+                  const deposits = await offrampClient.getAccountDeposits(walletAddr as `0x${string}`);
+
+                  // Find matching deposit by tx hash or deposit_id
+                  const matchedDeposit = deposits?.find((d: any) =>
+                    (selectedOrder.deposit_id && d.depositId?.toString() === selectedOrder.deposit_id) ||
+                    d.transactionHash === selectedOrder.tx_hash
+                  );
+
+                  let newStatus = selectedOrder.status;
+                  let intentHashes: string[] = selectedOrder.intent_hashes;
+
+                  if (matchedDeposit) {
+                    // Update deposit_id if we didn't have it
+                    const depositId = matchedDeposit.depositId?.toString() || selectedOrder.deposit_id;
+                    intentHashes = matchedDeposit.intentHashes || [];
+
+                    if (intentHashes.length === 0) {
+                      newStatus = 'active';
+                    } else {
+                      // Check fulfillment
+                      try {
+                        const fulfilled = await offrampClient.indexer.getFulfilledIntentEvents(intentHashes);
+                        const allFulfilled = fulfilled && fulfilled.length === intentHashes.length;
+                        newStatus = allFulfilled ? 'fulfilled' : 'active';
+                      } catch {
+                        newStatus = 'active';
+                      }
+                    }
+
+                    await updateOfframpOrder(selectedOrder.id!, {
+                      status: newStatus,
+                      intent_hashes: intentHashes,
+                      deposit_id: depositId,
+                    });
+
+                    const updated = { ...selectedOrder, status: newStatus, intent_hashes: intentHashes, deposit_id: depositId };
+                    setSelectedOrder(updated);
+                    setOfframpOrders(prev => prev.map(o => o.id === updated.id ? updated : o));
+                  } else {
+                    // Deposit not found on-chain yet, keep as pending
+                    if (selectedOrder.status === 'pending') {
+                      // Might just not be indexed yet
+                    }
+                  }
+                } catch (error) {
+                  console.error('Error refreshing order status:', error);
+                } finally {
+                  setIsRefreshingOrder(false);
+                }
+              }}
+              disabled={isRefreshingOrder}
+              style={{
+                marginTop: '20px', width: '100%', padding: '12px', borderRadius: '10px',
+                border: '1px solid #e5e7eb', background: isRefreshingOrder ? '#f3f4f6' : '#fff',
+                cursor: isRefreshingOrder ? 'not-allowed' : 'pointer', fontWeight: 500, fontSize: '14px',
+              }}
+            >
+              {isRefreshingOrder ? 'Refreshing...' : 'Refresh Status'}
+            </button>
+          </div>
+        </>
+      )}
 
       {/* Deposit Modal */}
       {showDepositModal && (
@@ -1908,10 +2850,10 @@ const Dashboard: React.FC = () => {
       )}
 
       {/* Withdraw Modal */}
+      {/* Withdraw Chooser Modal */}
       {showWithdrawModal && (
         <>
-          {/* Modal Backdrop */}
-          <div 
+          <div
             style={{
               position: 'fixed',
               top: 0,
@@ -1926,8 +2868,7 @@ const Dashboard: React.FC = () => {
             }}
             onClick={() => setShowWithdrawModal(false)}
           >
-            {/* Modal Content */}
-            <div 
+            <div
               style={{
                 backgroundColor: '#ffffff',
                 borderRadius: isMobile ? '16px 16px 0 0' : '16px',
@@ -1940,34 +2881,192 @@ const Dashboard: React.FC = () => {
               }}
               onClick={(e) => e.stopPropagation()}
             >
-              {/* Modal Header */}
+              {/* Header */}
+              <div style={{
+                padding: isMobile ? '20px 16px 16px 16px' : '24px 24px 16px 24px',
+                textAlign: 'center',
+                position: 'relative',
+                borderBottom: '1px solid #e5e5e5'
+              }}>
+                <h2 style={{ fontSize: '24px', fontWeight: '600', margin: 0, marginBottom: '8px' }}>
+                  Withdraw
+                </h2>
+                <p style={{ fontSize: '14px', color: '#666', margin: 0 }}>
+                  Balance: {usdcBalance} USDC
+                </p>
+                <button
+                  onClick={() => setShowWithdrawModal(false)}
+                  style={{
+                    position: 'absolute',
+                    top: '20px',
+                    right: '20px',
+                    background: 'none',
+                    border: 'none',
+                    color: '#666',
+                    cursor: 'pointer',
+                    padding: '4px',
+                    borderRadius: '4px',
+                    transition: 'color 0.2s ease'
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = '#000'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = '#666'; }}
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                  </svg>
+                </button>
+              </div>
+
+              {/* Body – two option buttons */}
+              <div style={{ padding: '24px' }}>
+                {/* Withdraw Crypto */}
+                <button
+                  onClick={() => {
+                    setShowWithdrawModal(false);
+                    setShowCryptoWithdrawModal(true);
+                  }}
+                  style={{
+                    width: '100%',
+                    backgroundColor: '#f8f9fa',
+                    border: '1px solid #e5e5e5',
+                    borderRadius: '12px',
+                    padding: '16px',
+                    marginBottom: '16px',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease',
+                    textAlign: 'left',
+                    color: '#000'
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#e9ecef'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#f8f9fa'; }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                    <div style={{
+                      width: '40px',
+                      height: '40px',
+                      backgroundColor: '#000',
+                      borderRadius: '8px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2">
+                        <path d="M13 2L3 14H12L11 22L21 10H12L13 2Z" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '16px', fontWeight: '600', marginBottom: '4px' }}>
+                        Withdraw Crypto
+                      </div>
+                      <div style={{ fontSize: '14px', color: '#666', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        Send USDC to any address
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          <img src="/usdc-icon.png" alt="USDC" style={{ width: '20px', height: '20px', borderRadius: '50%' }} />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </button>
+
+                {/* Withdraw to Fiat */}
+                <button
+                  onClick={() => {
+                    setShowWithdrawModal(false);
+                    setShowFiatWithdrawModal(true);
+                  }}
+                  style={{
+                    width: '100%',
+                    backgroundColor: '#f8f9fa',
+                    border: '1px solid #e5e5e5',
+                    borderRadius: '12px',
+                    padding: '16px',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease',
+                    textAlign: 'left',
+                    color: '#000'
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#e9ecef'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#f8f9fa'; }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                    <div style={{
+                      width: '40px',
+                      height: '40px',
+                      backgroundColor: '#000',
+                      borderRadius: '8px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2">
+                        <rect x="2" y="5" width="20" height="14" rx="2" ry="2"></rect>
+                        <line x1="2" y1="10" x2="22" y2="10"></line>
+                      </svg>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '16px', fontWeight: '600', marginBottom: '4px' }}>
+                        Withdraw to Fiat
+                      </div>
+                      <div style={{ fontSize: '14px', color: '#666' }}>
+                        Cash out via Venmo or Zelle
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Crypto Withdraw Modal */}
+      {showCryptoWithdrawModal && (
+        <>
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(0, 0, 0, 0.5)',
+              zIndex: 1000,
+              display: 'flex',
+              alignItems: isMobile ? 'flex-end' : 'center',
+              justifyContent: 'center'
+            }}
+            onClick={() => setShowCryptoWithdrawModal(false)}
+          >
+            <div
+              style={{
+                backgroundColor: '#ffffff',
+                borderRadius: isMobile ? '16px 16px 0 0' : '16px',
+                width: isMobile ? '100vw' : '440px',
+                maxWidth: isMobile ? '100vw' : '90vw',
+                maxHeight: isMobile ? '80vh' : '90vh',
+                overflow: 'hidden',
+                position: 'relative',
+                color: '#000'
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
               <div style={{
                 padding: isMobile ? '16px 16px 12px 16px' : '20px 24px 16px 24px',
                 textAlign: 'center',
                 position: 'relative',
                 borderBottom: '1px solid #e5e5e5'
               }}>
-                <h2 style={{
-                  fontSize: '24px',
-                  fontWeight: '600',
-                  margin: 0,
-                  marginBottom: '8px'
-                }}>
-                  Withdraw
+                <h2 style={{ fontSize: '24px', fontWeight: '600', margin: 0, marginBottom: '8px' }}>
+                  Withdraw Crypto
                 </h2>
-                <p style={{
-                  fontSize: '14px',
-                  color: '#666',
-                  margin: 0,
-                  marginBottom: '4px'
-                }}>
+                <p style={{ fontSize: '14px', color: '#666', margin: 0, marginBottom: '4px' }}>
                   Balance: {usdcBalance} USDC
                 </p>
-                
-                {/* Close Button */}
                 <button
                   onClick={() => {
-                    setShowWithdrawModal(false);
+                    setShowCryptoWithdrawModal(false);
                     setWithdrawAmount('');
                     setWithdrawAddress('');
                   }}
@@ -1983,12 +3082,8 @@ const Dashboard: React.FC = () => {
                     borderRadius: '4px',
                     transition: 'color 0.2s ease'
                   }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.color = '#000';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.color = '#666';
-                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = '#000'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = '#666'; }}
                 >
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -1997,10 +3092,8 @@ const Dashboard: React.FC = () => {
                 </button>
               </div>
 
-              {/* Modal Body */}
-              <div style={{
-                padding: '24px'
-              }}>
+              {/* Body */}
+              <div style={{ padding: '24px' }}>
                 {/* Token and Chain Info */}
                 <div style={{
                   display: 'grid',
@@ -2009,11 +3102,7 @@ const Dashboard: React.FC = () => {
                   marginBottom: '24px'
                 }}>
                   <div>
-                    <div style={{
-                      fontSize: '14px',
-                      color: '#666',
-                      marginBottom: '8px'
-                    }}>Token</div>
+                    <div style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>Token</div>
                     <div style={{
                       backgroundColor: '#f8f9fa',
                       border: '1px solid #e5e5e5',
@@ -2023,24 +3112,12 @@ const Dashboard: React.FC = () => {
                       alignItems: 'center',
                       gap: '8px'
                     }}>
-                      <img 
-                        src="/usdc-icon.png" 
-                        alt="USDC" 
-                        style={{
-                          width: '16px',
-                          height: '16px'
-                        }}
-                      />
+                      <img src="/usdc-icon.png" alt="USDC" style={{ width: '16px', height: '16px' }} />
                       <span style={{ fontSize: '14px', fontWeight: '500' }}>USDC</span>
                     </div>
                   </div>
-
                   <div>
-                    <div style={{
-                      fontSize: '14px',
-                      color: '#666',
-                      marginBottom: '8px'
-                    }}>Network</div>
+                    <div style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>Network</div>
                     <div style={{
                       backgroundColor: '#f8f9fa',
                       border: '1px solid #e5e5e5',
@@ -2050,14 +3127,7 @@ const Dashboard: React.FC = () => {
                       alignItems: 'center',
                       gap: '8px'
                     }}>
-                      <img 
-                        src="/base-icon.png" 
-                        alt="Base" 
-                        style={{
-                          width: '16px',
-                          height: '16px'
-                        }}
-                      />
+                      <img src="/base-icon.png" alt="Base" style={{ width: '16px', height: '16px' }} />
                       <span style={{ fontSize: '14px', fontWeight: '500' }}>Base</span>
                     </div>
                   </div>
@@ -2065,14 +3135,7 @@ const Dashboard: React.FC = () => {
 
                 {/* Amount Input */}
                 <div style={{ marginBottom: '24px' }}>
-                  <label style={{
-                    display: 'block',
-                    fontSize: '14px',
-                    color: '#666',
-                    marginBottom: '8px'
-                  }}>
-                    Amount
-                  </label>
+                  <label style={{ display: 'block', fontSize: '14px', color: '#666', marginBottom: '8px' }}>Amount</label>
                   <div style={{ position: 'relative' }}>
                     <input
                       type="number"
@@ -2091,12 +3154,8 @@ const Dashboard: React.FC = () => {
                         outline: 'none',
                         boxSizing: 'border-box'
                       }}
-                      onFocus={(e) => {
-                        e.currentTarget.style.borderColor = '#000';
-                      }}
-                      onBlur={(e) => {
-                        e.currentTarget.style.borderColor = '#e5e5e5';
-                      }}
+                      onFocus={(e) => { e.currentTarget.style.borderColor = '#000'; }}
+                      onBlur={(e) => { e.currentTarget.style.borderColor = '#e5e5e5'; }}
                     />
                     <div style={{
                       position: 'absolute',
@@ -2106,16 +3165,12 @@ const Dashboard: React.FC = () => {
                       fontSize: '14px',
                       color: '#666',
                       fontWeight: '500'
-                    }}>
-                      USDC
-                    </div>
+                    }}>USDC</div>
                   </div>
                   <button
                     onClick={() => {
                       const balance = parseFloat(usdcBalance);
-                      if (!isNaN(balance)) {
-                        setWithdrawAmount(balance.toString());
-                      }
+                      if (!isNaN(balance)) setWithdrawAmount(balance.toString());
                     }}
                     style={{
                       marginTop: '8px',
@@ -2131,16 +3186,9 @@ const Dashboard: React.FC = () => {
                   </button>
                 </div>
 
-                {/* Destination Address Input */}
+                {/* Destination Address */}
                 <div style={{ marginBottom: '32px' }}>
-                  <label style={{
-                    display: 'block',
-                    fontSize: '14px',
-                    color: '#666',
-                    marginBottom: '8px'
-                  }}>
-                    Destination Address
-                  </label>
+                  <label style={{ display: 'block', fontSize: '14px', color: '#666', marginBottom: '8px' }}>Destination Address</label>
                   <input
                     type="text"
                     value={withdrawAddress}
@@ -2158,18 +3206,10 @@ const Dashboard: React.FC = () => {
                       boxSizing: 'border-box',
                       fontFamily: 'monospace'
                     }}
-                    onFocus={(e) => {
-                      e.currentTarget.style.borderColor = '#000';
-                    }}
-                    onBlur={(e) => {
-                      e.currentTarget.style.borderColor = '#e5e5e5';
-                    }}
+                    onFocus={(e) => { e.currentTarget.style.borderColor = '#000'; }}
+                    onBlur={(e) => { e.currentTarget.style.borderColor = '#e5e5e5'; }}
                   />
-                  <div style={{
-                    fontSize: '12px',
-                    color: '#999',
-                    marginTop: '4px'
-                  }}>
+                  <div style={{ fontSize: '12px', color: '#999', marginTop: '4px' }}>
                     Enter the wallet address where you want to receive USDC
                   </div>
                 </div>
@@ -2181,14 +3221,10 @@ const Dashboard: React.FC = () => {
                       alert('Please enter both amount and destination address');
                       return;
                     }
-
-                    // Validate address format (basic validation)
                     if (!withdrawAddress.match(/^0x[a-fA-F0-9]{40}$/)) {
                       alert('Please enter a valid Ethereum address');
                       return;
                     }
-
-                    // Validate amount
                     const amount = parseFloat(withdrawAmount);
                     const balance = parseFloat(usdcBalance);
                     if (isNaN(amount) || amount <= 0) {
@@ -2201,60 +3237,26 @@ const Dashboard: React.FC = () => {
                     }
 
                     setIsWithdrawing(true);
-                    
                     try {
-                      console.log('🎯 Initiating withdrawal...');
-
-                      // Execute withdrawal through connected wallet
-                      const txHash = await executeGaslessWithdrawal(amount, withdrawAddress);
-                      
-                      console.log('✅ Smart wallet withdrawal successful:', txHash);
-                      
-                      // Show success message
+                      const txHash = await executeUsdcTransfer(amount, withdrawAddress);
                       alert(
-                        `🎉 Withdrawal Successful!\\n\\n` +
-                        `Amount: ${amount} USDC\\n` +
-                        `To: ${withdrawAddress}\\n` +
-                        `Transaction: ${txHash}\\n\\n` +
+                        `Withdrawal Successful!\n\n` +
+                        `Amount: ${amount} USDC\n` +
+                        `To: ${withdrawAddress}\n` +
+                        `Transaction: ${txHash}\n\n` +
                         `View on BaseScan: https://basescan.org/tx/${txHash}`
                       );
-                      
-                      // Reset form and close modal
                       setWithdrawAmount('');
                       setWithdrawAddress('');
-                      setShowWithdrawModal(false);
-                      
-                      // Refresh balance after a short delay to allow transaction to be processed
+                      setShowCryptoWithdrawModal(false);
                       setTimeout(() => {
-                        const smartWalletAddress = getWalletAddress();
-                        if (smartWalletAddress) {
-                          fetchAllWalletBalances();
-                        }
+                        if (getWalletAddress()) fetchAllWalletBalances();
                       }, 3000);
-                      
                     } catch (error: any) {
-                      console.error('❌ Smart wallet withdrawal failed:', error);
-                      console.error('Full error object:', JSON.stringify(error, null, 2));
-                      
-                      let errorMessage = 'Unknown error occurred';
-                      if (error.message) {
-                        if (error.message.includes('insufficient funds') || 
-                            error.message.includes('insufficient balance') ||
-                            error.message.includes('Insufficient USDC balance')) {
-                          errorMessage = error.message;
-                        } else if (error.message.includes('user rejected') || error.message.includes('user denied')) {
-                          errorMessage = 'Transaction was cancelled by user';
-                        } else if (error.message.includes('network') || error.message.includes('paymaster')) {
-                          errorMessage = 'Network or paymaster error. Please check your connection and try again';
-                        } else if (error.message.includes('Pimlico API key')) {
-                          errorMessage = 'Paymaster configuration error. Please contact support';
-                        } else if (error.message.includes('UserOperation reverted')) {
-                          errorMessage = 'Transaction simulation failed. This might be due to insufficient balance, invalid address, or contract restrictions. Please check the console for details.';
-                        } else {
-                          errorMessage = error.message;
-                        }
+                      let errorMessage = error.message || 'Unknown error occurred';
+                      if (error.message?.includes('user rejected') || error.message?.includes('user denied')) {
+                        errorMessage = 'Transaction was cancelled by user';
                       }
-                      
                       alert(`Withdrawal failed: ${errorMessage}`);
                     } finally {
                       setIsWithdrawing(false);
@@ -2279,14 +3281,10 @@ const Dashboard: React.FC = () => {
                     opacity: (isWithdrawing || !withdrawAmount || !withdrawAddress) ? 0.6 : 1
                   }}
                   onMouseEnter={(e) => {
-                    if (!isWithdrawing && withdrawAmount && withdrawAddress) {
-                      e.currentTarget.style.backgroundColor = '#333';
-                    }
+                    if (!isWithdrawing && withdrawAmount && withdrawAddress) e.currentTarget.style.backgroundColor = '#333';
                   }}
                   onMouseLeave={(e) => {
-                    if (!isWithdrawing && withdrawAmount && withdrawAddress) {
-                      e.currentTarget.style.backgroundColor = '#000';
-                    }
+                    if (!isWithdrawing && withdrawAmount && withdrawAddress) e.currentTarget.style.backgroundColor = '#000';
                   }}
                 >
                   {isWithdrawing ? (
@@ -2310,6 +3308,284 @@ const Dashboard: React.FC = () => {
                     </>
                   )}
                 </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Fiat Withdraw (Offramp) Modal */}
+      {showFiatWithdrawModal && (
+        <>
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(0, 0, 0, 0.5)',
+              zIndex: 1000,
+              display: 'flex',
+              alignItems: isMobile ? 'flex-end' : 'center',
+              justifyContent: 'center'
+            }}
+            onClick={() => { setShowFiatWithdrawModal(false); setOfframpStatus(null); }}
+          >
+            <div
+              style={{
+                backgroundColor: '#ffffff',
+                borderRadius: isMobile ? '16px 16px 0 0' : '16px',
+                width: isMobile ? '100vw' : '440px',
+                maxWidth: isMobile ? '100vw' : '90vw',
+                maxHeight: isMobile ? '80vh' : '90vh',
+                overflow: 'auto',
+                position: 'relative',
+                color: '#000'
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div style={{
+                padding: isMobile ? '20px 16px 16px 16px' : '24px 24px 16px 24px',
+                textAlign: 'center',
+                position: 'relative',
+                borderBottom: '1px solid #e5e5e5'
+              }}>
+                <h2 style={{ fontSize: '24px', fontWeight: '600', margin: 0, marginBottom: '8px' }}>
+                  Withdraw to Fiat
+                </h2>
+                <p style={{ fontSize: '14px', color: '#666', margin: 0 }}>
+                  Balance: {usdcBalance} USDC
+                </p>
+                <button
+                  onClick={() => { setShowFiatWithdrawModal(false); setOfframpStatus(null); }}
+                  style={{
+                    position: 'absolute',
+                    top: '20px',
+                    right: '20px',
+                    background: 'none',
+                    border: 'none',
+                    color: '#666',
+                    cursor: 'pointer',
+                    padding: '4px',
+                    borderRadius: '4px',
+                    transition: 'color 0.2s ease'
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = '#000'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = '#666'; }}
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                  </svg>
+                </button>
+              </div>
+
+              {/* Body */}
+              <div style={{ padding: '24px' }}>
+                {offrampSettings.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '16px 0' }}>
+                    <p style={{ fontSize: '14px', color: '#666', marginBottom: '16px' }}>
+                      No payment methods configured. Add a Venmo or Zelle account in the Offramp settings tab first.
+                    </p>
+                    <button
+                      onClick={() => {
+                        setShowFiatWithdrawModal(false);
+                        setActiveTab('ramp');
+                      }}
+                      style={{
+                        backgroundColor: '#000',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '8px',
+                        padding: '12px 24px',
+                        fontSize: '14px',
+                        fontWeight: '600',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease'
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#333'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#000'; }}
+                    >
+                      Go to Offramp Settings
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    {/* Payment Method Selector */}
+                    <div style={{ marginBottom: '24px' }}>
+                      <label style={{ display: 'block', fontSize: '14px', color: '#666', marginBottom: '8px' }}>
+                        Payment Method
+                      </label>
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        {offrampSettings.map((setting) => (
+                          <button
+                            key={setting.processor}
+                            onClick={() => setSelectedProcessor(setting.processor)}
+                            style={{
+                              flex: 1,
+                              padding: '12px',
+                              borderRadius: '8px',
+                              border: selectedProcessor === setting.processor ? '2px solid #000' : '1px solid #e5e5e5',
+                              backgroundColor: selectedProcessor === setting.processor ? '#f0f0f0' : '#fff',
+                              cursor: 'pointer',
+                              textAlign: 'center',
+                              transition: 'all 0.2s ease'
+                            }}
+                          >
+                            <div style={{ fontSize: '14px', fontWeight: '600', textTransform: 'capitalize' }}>
+                              {setting.processor}
+                            </div>
+                            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                              {setting.identifier}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Amount Input */}
+                    <div style={{ marginBottom: '24px' }}>
+                      <label style={{ display: 'block', fontSize: '14px', color: '#666', marginBottom: '8px' }}>Amount</label>
+                      <div style={{ position: 'relative' }}>
+                        <input
+                          type="number"
+                          value={offrampAmount}
+                          onChange={(e) => setOfframpAmount(e.target.value)}
+                          placeholder="0.00"
+                          style={{
+                            width: '100%',
+                            padding: '12px 16px',
+                            paddingRight: '60px',
+                            border: '1px solid #e5e5e5',
+                            borderRadius: '8px',
+                            fontSize: '16px',
+                            backgroundColor: '#ffffff',
+                            color: '#000',
+                            outline: 'none',
+                            boxSizing: 'border-box'
+                          }}
+                          onFocus={(e) => { e.currentTarget.style.borderColor = '#000'; }}
+                          onBlur={(e) => { e.currentTarget.style.borderColor = '#e5e5e5'; }}
+                        />
+                        <div style={{
+                          position: 'absolute',
+                          right: '16px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          fontSize: '14px',
+                          color: '#666',
+                          fontWeight: '500'
+                        }}>USDC</div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          const balance = parseFloat(usdcBalance);
+                          if (!isNaN(balance)) setOfframpAmount(balance.toString());
+                        }}
+                        style={{
+                          marginTop: '8px',
+                          backgroundColor: 'transparent',
+                          border: 'none',
+                          color: '#0066cc',
+                          fontSize: '12px',
+                          cursor: 'pointer',
+                          textDecoration: 'underline'
+                        }}
+                      >
+                        Use max balance
+                      </button>
+                    </div>
+
+                    {/* Conversion info */}
+                    {selectedProcessor && offrampAmount && (
+                      <div style={{
+                        backgroundColor: '#f8f9fa',
+                        border: '1px solid #e5e5e5',
+                        borderRadius: '8px',
+                        padding: '12px 16px',
+                        marginBottom: '24px',
+                        fontSize: '13px',
+                        color: '#666'
+                      }}>
+                        {(() => {
+                          const setting = offrampSettings.find(s => s.processor === selectedProcessor);
+                          const rate = setting ? parseFloat(setting.conversion_rate) : 1;
+                          const amount = parseFloat(offrampAmount);
+                          const fiatAmount = !isNaN(amount) ? (amount / rate).toFixed(2) : '--';
+                          return `You will receive ~$${fiatAmount} USD via ${selectedProcessor} (rate: ${rate})`;
+                        })()}
+                      </div>
+                    )}
+
+                    {/* Withdraw Button */}
+                    <button
+                      onClick={handleWithdraw}
+                      disabled={isOfframping || !offrampAmount || !selectedProcessor}
+                      style={{
+                        width: '100%',
+                        backgroundColor: (isOfframping || !offrampAmount || !selectedProcessor) ? '#ccc' : '#000',
+                        border: 'none',
+                        borderRadius: '8px',
+                        padding: '16px',
+                        color: '#fff',
+                        fontSize: '16px',
+                        fontWeight: '600',
+                        cursor: (isOfframping || !offrampAmount || !selectedProcessor) ? 'not-allowed' : 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '8px',
+                        transition: 'background-color 0.2s ease',
+                        opacity: (isOfframping || !offrampAmount || !selectedProcessor) ? 0.6 : 1
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!isOfframping && offrampAmount && selectedProcessor) e.currentTarget.style.backgroundColor = '#333';
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!isOfframping && offrampAmount && selectedProcessor) e.currentTarget.style.backgroundColor = '#000';
+                      }}
+                    >
+                      {isOfframping ? (
+                        <>
+                          <div style={{
+                            width: '16px',
+                            height: '16px',
+                            border: '2px solid #fff',
+                            borderTop: '2px solid transparent',
+                            borderRadius: '50%',
+                            animation: 'spin 1s linear infinite'
+                          }}></div>
+                          {offrampStatus || 'Processing...'}
+                        </>
+                      ) : (
+                        <>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <rect x="2" y="5" width="20" height="14" rx="2" ry="2"></rect>
+                            <line x1="2" y1="10" x2="22" y2="10"></line>
+                          </svg>
+                          Withdraw {offrampAmount ? `${offrampAmount} USDC` : 'to Fiat'}
+                        </>
+                      )}
+                    </button>
+
+                    {/* Status message */}
+                    {offrampStatus && !isOfframping && (
+                      <div style={{
+                        marginTop: '16px',
+                        padding: '12px 16px',
+                        borderRadius: '8px',
+                        fontSize: '13px',
+                        backgroundColor: offrampStatus.startsWith('Error') ? '#fff5f5' : '#f0fff0',
+                        border: `1px solid ${offrampStatus.startsWith('Error') ? '#ffcccc' : '#ccffcc'}`,
+                        color: offrampStatus.startsWith('Error') ? '#cc0000' : '#006600'
+                      }}>
+                        {offrampStatus}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -2499,7 +3775,7 @@ const Dashboard: React.FC = () => {
                       });
 
                       // Execute transfer through connected wallet
-                      const txHash = await executeGaslessWithdrawal(amount, embeddedAddr);
+                      const txHash = await executeUsdcTransfer(amount, embeddedAddr);
                       
                       console.log('✅ Top-up transfer successful:', txHash);
                       

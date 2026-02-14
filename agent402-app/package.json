@@ -11,7 +11,8 @@
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.9.3",
-    "viem": "^2.37.12"
+    "viem": "^2.37.12",
+    "@zkp2p/sdk": "^0.0.11"
   },
   "scripts": {
     "dev": "vite",

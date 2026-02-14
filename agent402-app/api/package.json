@@ -11,6 +11,7 @@
     "@coinbase/x402": "^0.7.3",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@supabase/supabase-js": "^2.75.0",
+    "@zkp2p/sdk": "^0.0.11",
     "hono": "^4.10.6",
     "viem": "^2.37.12",
     "x402-hono": "^0.7.3"

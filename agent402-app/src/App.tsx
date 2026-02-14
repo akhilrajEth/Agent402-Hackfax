@@ -31,16 +31,13 @@ const App: React.FC = () => {
             createOnLogin: 'all-users',
           },
         },
-        loginMethods: ['email', 'wallet'],
+        loginMethods: ['email'],
         appearance: {
           theme: 'light',
           accentColor: '#000000'
         },
         supportedChains: [base],
         defaultChain: base,
-        externalWallets: {
-          hideCallout: false,
-        },
       }}
       onSuccess={() => {
         // Suppress analytics events
