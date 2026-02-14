@@ -3,7 +3,7 @@ import { usePrivy, useWallets, useSendTransaction } from '@privy-io/react-auth';
 import { createPublicClient, http } from 'viem';
 import { base } from 'viem/chains';
 import './Dashboard.css';
-import { getUserPaymentData, formatCurrency, PaymentRecord, OfframpSetting, getOfframpSettings, upsertOfframpSetting, deleteOfframpSetting, OfframpOrder, insertOfframpOrder, getOfframpOrders, updateOfframpOrder } from '../lib/supabase';
+import { getUserPaymentData, formatCurrency, PaymentRecord, OfframpSetting, getOfframpSettings, upsertOfframpSetting, deleteOfframpSetting, OfframpOrder, insertOfframpOrder } from '../lib/supabase';
 import { logout as clearAuth } from './ProtectedRoute';
 
 const Dashboard: React.FC = () => {
@@ -184,7 +184,72 @@ const Dashboard: React.FC = () => {
     if (!walletAddr) return;
     setIsLoadingOrders(true);
     try {
-      const orders = await getOfframpOrders(walletAddr);
+      const { OfframpClient, resolvePaymentMethodNameFromHash, getPaymentMethodsCatalog } = await import('@zkp2p/sdk');
+      const { createWalletClient: createWC, http: viemHttp } = await import('viem');
+      const { base } = await import('viem/chains');
+
+      // Use standard http transport for read-only operations (no signing needed)
+      const walletClient = createWC({
+        account: walletAddr as `0x${string}`,
+        chain: base,
+        transport: viemHttp(),
+      });
+
+      const zkp2pApiKey = import.meta.env.VITE_ZKP2P_API_KEY || '';
+      const offrampClient = new OfframpClient({
+        apiKey: zkp2pApiKey,
+        walletClient: walletClient as any,
+        chainId: base.id,
+      });
+
+      // Use the indexer instead of on-chain reads to avoid BigInt parsing issues
+      const deposits = await offrampClient.indexer.getDepositsWithRelations(
+        { depositor: walletAddr.toLowerCase() },
+        { orderBy: 'updatedAt', orderDirection: 'desc' },
+        { includeIntents: true, intentStatuses: ['SIGNALED', 'FULFILLED'] }
+      );
+
+      const catalog = getPaymentMethodsCatalog(base.id, 'production');
+
+      // Build a map of processor identifiers from offramp settings
+      const settingsMap = new Map<string, OfframpSetting>();
+      offrampSettings.forEach(s => settingsMap.set(s.processor, s));
+
+      const orders: OfframpOrder[] = (deposits || []).map((dep: any) => {
+        // Resolve processor name from payment method hash
+        const pmHash = dep.paymentMethods?.[0]?.paymentMethodHash || '';
+        const processorName = resolvePaymentMethodNameFromHash(pmHash, catalog) || 'unknown';
+        const setting = settingsMap.get(processorName);
+
+        // Conversion rate from indexer (already a string in 18-decimal format)
+        const rateRaw = dep.currencies?.[0]?.minConversionRate;
+        const rateStr = rateRaw ? (Number(rateRaw) / 1e18).toFixed(2) : setting?.conversion_rate || '1.00';
+
+        // Collect intent hashes
+        const intentHashes = (dep.intents || []).map((i: any) => i.intentHash);
+        const allFulfilled = intentHashes.length > 0 && (dep.intents || []).every((i: any) => i.status === 'FULFILLED');
+        const remainingAmount = Number(dep.remainingDeposits || '0') / 1e6;
+
+        // Map indexer status — closed with 0 remaining means cancelled/withdrawn
+        let status = dep.status === 'ACTIVE' ? 'active' : (remainingAmount === 0 ? 'cancelled' : 'closed');
+        if (allFulfilled) status = 'fulfilled';
+
+        return {
+          id: dep.depositId,
+          wallet_address: walletAddr,
+          deposit_id: dep.depositId,
+          tx_hash: dep.txHash || '',
+          amount: remainingAmount,
+          processor: processorName,
+          identifier: setting?.identifier || '',
+          conversion_rate: rateStr,
+          status,
+          intent_hashes: intentHashes,
+          created_at: dep.timestamp ? new Date(Number(dep.timestamp) * 1000).toISOString() : undefined,
+          updated_at: dep.updatedAt || undefined,
+        } as OfframpOrder;
+      });
+
       setOfframpOrders(orders);
     } catch (error) {
       console.error('Error fetching offramp orders:', error);
@@ -318,16 +383,37 @@ const Dashboard: React.FC = () => {
       const txHash = deposit?.hash || '';
       setOfframpStatus(`Withdrawal initiated! Tx: ${txHash.slice(0, 10)}...`);
 
+      // Wait for tx to be mined, then fetch deposit ID from on-chain
+      let depositId = '';
+      if (txHash) {
+        try {
+          setOfframpStatus('Waiting for transaction confirmation...');
+          await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
+
+          // Fetch deposits to find the one we just created
+          const deposits = await offrampClient.getAccountDeposits(walletAddr as `0x${string}`);
+          if (deposits && deposits.length > 0) {
+            // Match by amount — the most recently created deposit with matching amount
+            const matchedDeposit = deposits.find((d: any) =>
+              d.deposit?.amount?.toString() === depositAmount.toString()
+            ) || deposits[deposits.length - 1];
+            depositId = matchedDeposit.depositId?.toString() || '';
+          }
+        } catch (e) {
+          console.warn('Could not fetch deposit ID after tx confirmation:', e);
+        }
+      }
+
       // Save order to Supabase
       const newOrder = await insertOfframpOrder({
         wallet_address: walletAddr,
-        deposit_id: '',
+        deposit_id: depositId,
         tx_hash: txHash,
         amount: parseFloat(offrampAmount),
         processor: setting.processor,
         identifier: setting.identifier,
         conversion_rate: setting.conversion_rate,
-        status: 'pending',
+        status: depositId ? 'active' : 'pending',
         intent_hashes: [],
       });
       if (newOrder) {
@@ -1549,10 +1635,10 @@ const Dashboard: React.FC = () => {
                   }}>
                     Loading transaction history...
                   </div>
-                ) : paymentHistory.length === 0 ? (
-                  <div style={{ 
-                    textAlign: 'center', 
-                    color: '#999', 
+                ) : (paymentHistory.length === 0 && offrampOrders.filter(o => o.status === 'closed' || o.status === 'fulfilled' || o.status === 'cancelled').length === 0) ? (
+                  <div style={{
+                    textAlign: 'center',
+                    color: '#999',
                     fontSize: '14px',
                     padding: '40px 0'
                   }}>
@@ -1563,6 +1649,48 @@ const Dashboard: React.FC = () => {
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {offrampOrders.filter(o => o.status === 'closed' || o.status === 'fulfilled' || o.status === 'cancelled').map((order) => (
+                      <div
+                        key={`offramp-${order.id}`}
+                        onClick={() => { setSelectedOrder(order); setShowOrderDetailModal(true); }}
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          padding: '12px',
+                          backgroundColor: '#fff',
+                          borderRadius: '8px',
+                          border: '1px solid #f0f0f0',
+                          cursor: 'pointer',
+                          transition: 'background 0.15s',
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.backgroundColor = '#f9fafb'}
+                        onMouseLeave={e => e.currentTarget.style.backgroundColor = '#fff'}
+                      >
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: '14px', fontWeight: 500, color: '#000', marginBottom: '4px' }}>
+                            {order.amount} USDC → {order.processor}
+                          </div>
+                          <div style={{ fontSize: '11px', color: '#999' }}>
+                            {order.created_at ? new Date(order.created_at).toLocaleString() : `Deposit #${order.deposit_id}`}
+                          </div>
+                        </div>
+                        <span style={{
+                          padding: '3px 10px',
+                          borderRadius: '12px',
+                          fontSize: '12px',
+                          fontWeight: 500,
+                          backgroundColor:
+                            order.status === 'fulfilled' ? '#d1fae5' :
+                            order.status === 'cancelled' ? '#fee2e2' : '#f3f4f6',
+                          color:
+                            order.status === 'fulfilled' ? '#065f46' :
+                            order.status === 'cancelled' ? '#991b1b' : '#6b7280',
+                        }}>
+                          {order.status}
+                        </span>
+                      </div>
+                    ))}
                     {paymentHistory.map((payment) => (
                       <div key={payment.id} style={{
                         display: 'flex',
@@ -1693,16 +1821,16 @@ const Dashboard: React.FC = () => {
                   <div style={{ textAlign: 'center', color: '#999', fontSize: '14px', padding: '40px 0' }}>
                     Loading orders...
                   </div>
-                ) : offrampOrders.length === 0 ? (
+                ) : offrampOrders.filter(o => o.status !== 'closed' && o.status !== 'fulfilled' && o.status !== 'cancelled').length === 0 ? (
                   <div style={{ textAlign: 'center', color: '#999', fontSize: '14px', padding: '40px 0' }}>
-                    No withdrawal orders yet
+                    No active withdrawal orders
                     <div style={{ fontSize: '12px', marginTop: '8px' }}>
                       Fiat withdrawals will appear here once you initiate them from the Ramp tab
                     </div>
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {offrampOrders.map((order) => (
+                    {offrampOrders.filter(o => o.status !== 'closed' && o.status !== 'fulfilled' && o.status !== 'cancelled').map((order) => (
                       <div
                         key={order.id}
                         onClick={() => { setSelectedOrder(order); setShowOrderDetailModal(true); }}
@@ -1725,7 +1853,7 @@ const Dashboard: React.FC = () => {
                             {order.amount} USDC → {order.processor}
                           </div>
                           <div style={{ fontSize: '11px', color: '#999' }}>
-                            {new Date(order.created_at || '').toLocaleString()}
+                            Deposit #{order.deposit_id}
                           </div>
                         </div>
                         <span style={{
@@ -2397,15 +2525,23 @@ app.listen(4021);`}</pre>
                   backgroundColor:
                     selectedOrder.status === 'pending' ? '#fef3c7' :
                     selectedOrder.status === 'active' ? '#dbeafe' :
-                    selectedOrder.status === 'fulfilled' ? '#d1fae5' : '#f3f4f6',
+                    selectedOrder.status === 'fulfilled' ? '#d1fae5' :
+                    selectedOrder.status === 'cancelled' ? '#fee2e2' : '#f3f4f6',
                   color:
                     selectedOrder.status === 'pending' ? '#92400e' :
                     selectedOrder.status === 'active' ? '#1e40af' :
-                    selectedOrder.status === 'fulfilled' ? '#065f46' : '#6b7280',
+                    selectedOrder.status === 'fulfilled' ? '#065f46' :
+                    selectedOrder.status === 'cancelled' ? '#991b1b' : '#6b7280',
                 }}>
                   {selectedOrder.status}
                 </span>
               </div>
+              {selectedOrder.deposit_id && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#888', fontSize: '13px' }}>Deposit ID</span>
+                  <span style={{ fontWeight: 500 }}>#{selectedOrder.deposit_id}</span>
+                </div>
+              )}
               {selectedOrder.tx_hash && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ color: '#888', fontSize: '13px' }}>Tx Hash</span>
@@ -2419,10 +2555,12 @@ app.listen(4021);`}</pre>
                   </a>
                 </div>
               )}
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888', fontSize: '13px' }}>Created</span>
-                <span style={{ fontSize: '13px' }}>{new Date(selectedOrder.created_at || '').toLocaleString()}</span>
-              </div>
+              {selectedOrder.created_at && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#888', fontSize: '13px' }}>Created</span>
+                  <span style={{ fontSize: '13px' }}>{new Date(selectedOrder.created_at).toLocaleString()}</span>
+                </div>
+              )}
               {selectedOrder.intent_hashes.length > 0 && (
                 <div>
                   <span style={{ color: '#888', fontSize: '13px' }}>Intent Hashes</span>
@@ -2435,79 +2573,17 @@ app.listen(4021);`}</pre>
 
             <button
               onClick={async () => {
-                if (!selectedOrder?.id) return;
+                if (!selectedOrder?.deposit_id) return;
                 setIsRefreshingOrder(true);
                 try {
-                  const embeddedWallet = wallets.find(w => w.walletClientType === 'privy');
-                  if (!embeddedWallet) throw new Error('Embedded wallet not found');
-
-                  const provider = await embeddedWallet.getEthereumProvider();
-                  const { createWalletClient: createWC, custom } = await import('viem');
-                  const { base } = await import('viem/chains');
-                  const { OfframpClient } = await import('@zkp2p/sdk');
-
-                  const walletAddr = getWalletAddress();
-                  const walletClient = createWC({
-                    account: walletAddr as `0x${string}`,
-                    chain: base,
-                    transport: custom({
-                      async request({ method, params }: { method: string; params: any }) {
-                        return provider.request({ method, params });
-                      },
-                    }),
+                  // Re-fetch all orders from the indexer and update
+                  await fetchOfframpOrders();
+                  // Find the updated version of the selected order
+                  setOfframpOrders(prev => {
+                    const updated = prev.find(o => o.deposit_id === selectedOrder.deposit_id);
+                    if (updated) setSelectedOrder(updated);
+                    return prev;
                   });
-
-                  const zkp2pApiKey = import.meta.env.VITE_ZKP2P_API_KEY || '';
-                  const offrampClient = new OfframpClient({
-                    apiKey: zkp2pApiKey,
-                    walletClient: walletClient as any,
-                    chainId: base.id,
-                  });
-
-                  const deposits = await offrampClient.getAccountDeposits(walletAddr as `0x${string}`);
-
-                  // Find matching deposit by tx hash or deposit_id
-                  const matchedDeposit = deposits?.find((d: any) =>
-                    (selectedOrder.deposit_id && d.depositId?.toString() === selectedOrder.deposit_id) ||
-                    d.transactionHash === selectedOrder.tx_hash
-                  );
-
-                  let newStatus = selectedOrder.status;
-                  let intentHashes: string[] = selectedOrder.intent_hashes;
-
-                  if (matchedDeposit) {
-                    // Update deposit_id if we didn't have it
-                    const depositId = matchedDeposit.depositId?.toString() || selectedOrder.deposit_id;
-                    intentHashes = matchedDeposit.intentHashes || [];
-
-                    if (intentHashes.length === 0) {
-                      newStatus = 'active';
-                    } else {
-                      // Check fulfillment
-                      try {
-                        const fulfilled = await offrampClient.indexer.getFulfilledIntentEvents(intentHashes);
-                        const allFulfilled = fulfilled && fulfilled.length === intentHashes.length;
-                        newStatus = allFulfilled ? 'fulfilled' : 'active';
-                      } catch {
-                        newStatus = 'active';
-                      }
-                    }
-
-                    await updateOfframpOrder(selectedOrder.id!, {
-                      status: newStatus,
-                      intent_hashes: intentHashes,
-                      deposit_id: depositId,
-                    });
-
-                    const updated = { ...selectedOrder, status: newStatus, intent_hashes: intentHashes, deposit_id: depositId };
-                    setSelectedOrder(updated);
-                    setOfframpOrders(prev => prev.map(o => o.id === updated.id ? updated : o));
-                  } else {
-                    // Deposit not found on-chain yet, keep as pending
-                    if (selectedOrder.status === 'pending') {
-                      // Might just not be indexed yet
-                    }
-                  }
                 } catch (error) {
                   console.error('Error refreshing order status:', error);
                 } finally {
