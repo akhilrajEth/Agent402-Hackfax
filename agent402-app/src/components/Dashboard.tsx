@@ -49,7 +49,7 @@ const Dashboard: React.FC = () => {
   const [showOrderDetailModal, setShowOrderDetailModal] = useState(false);
   const [isRefreshingOrder, setIsRefreshingOrder] = useState(false);
   const [isLoadingOrders, setIsLoadingOrders] = useState(false);
-  const { ready, authenticated, user, login, logout } = usePrivy();
+  const { ready, authenticated, user, login, logout, exportWallet } = usePrivy();
   const { wallets } = useWallets();
   const { sendTransaction } = useSendTransaction();
 
@@ -1767,7 +1767,58 @@ const Dashboard: React.FC = () => {
             }}>
               API
             </h1>
-            {/* API content will go here */}
+            {/* Export Private Key Card */}
+            <div style={{
+              background: '#fff',
+              border: '1px solid #e5e7eb',
+              borderRadius: '12px',
+              padding: isMobile ? '20px' : '24px',
+              maxWidth: '480px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                <div style={{
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '10px',
+                  background: '#f3f4f6',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '20px'
+                }}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: '#000' }}>
+                    Export Private Key
+                  </h3>
+                  <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#6b7280' }}>
+                    Export your embedded wallet's private key
+                  </p>
+                </div>
+              </div>
+              <p style={{ fontSize: '13px', color: '#6b7280', margin: '0 0 16px 0', lineHeight: '1.5' }}>
+                This will open a secure modal where you can view and copy your private key. Never share your private key with anyone.
+              </p>
+              <button
+                onClick={() => exportWallet()}
+                style={{
+                  width: '100%',
+                  padding: '10px 16px',
+                  background: '#000',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  cursor: 'pointer'
+                }}
+              >
+                Export Private Key
+              </button>
+            </div>
           </div>
         )}
 
