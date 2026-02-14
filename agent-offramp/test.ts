@@ -16,7 +16,7 @@ async function main() {
     const client = new OfframpClient({
         walletClient,
         chainId: base.id,
-        apiKey: process.env.API_KEY!,
+        apiKey: process.env.ZKP2P_API_KEY!,
     });
 
     const allowanceResult = await client.ensureAllowance({
