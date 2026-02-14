@@ -1,0 +1,13 @@
+name = "agent402-api"
+main = "index.ts"
+compatibility_date = "2025-05-26"
+compatibility_flags = ["nodejs_compat"]
+
+
+# Enable Workers Logs
+[observability]
+enabled = true
+
+# Production environment
+[env.production]
+vars = { ENVIRONMENT = "production" }
