@@ -49,6 +49,7 @@ const Dashboard: React.FC = () => {
   const [showOrderDetailModal, setShowOrderDetailModal] = useState(false);
   const [isRefreshingOrder, setIsRefreshingOrder] = useState(false);
   const [isLoadingOrders, setIsLoadingOrders] = useState(false);
+  const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null);
   const { ready, authenticated, user, login, logout, exportWallet } = usePrivy();
   const { wallets } = useWallets();
   const { sendTransaction } = useSendTransaction();
@@ -433,6 +434,68 @@ const Dashboard: React.FC = () => {
       setOfframpStatus(`Error: ${(error as Error).message}`);
     } finally {
       setIsOfframping(false);
+    }
+  };
+
+  const handleCancelOrder = async (order: OfframpOrder) => {
+    const walletAddr = getWalletAddress();
+    if (!walletAddr || !order.deposit_id) return;
+
+    setCancellingOrderId(order.deposit_id);
+    try {
+      const embeddedWallet = wallets.find(w => w.walletClientType === 'privy');
+      if (!embeddedWallet) throw new Error('Embedded wallet not found');
+
+      const provider = await embeddedWallet.getEthereumProvider();
+      const { createWalletClient: createWC, custom, parseUnits } = await import('viem');
+      const { base } = await import('viem/chains');
+      const { OfframpClient } = await import('@zkp2p/sdk');
+
+      const walletClient = createWC({
+        account: walletAddr as `0x${string}`,
+        chain: base,
+        transport: custom({
+          async request({ method, params }: { method: string; params: any }) {
+            if (method === 'eth_sendTransaction') {
+              const tx = Array.isArray(params) ? params[0] : params;
+              const receipt = await sendTransaction(
+                { to: tx.to, data: tx.data, value: tx.value },
+                { sponsor: true }
+              );
+              return receipt.hash;
+            }
+            return provider.request({ method, params });
+          },
+        }),
+      });
+
+      const zkp2pApiKey = import.meta.env.VITE_ZKP2P_API_KEY || '';
+      const offrampClient = new OfframpClient({
+        apiKey: zkp2pApiKey,
+        walletClient: walletClient as any,
+        chainId: base.id,
+      });
+
+      const amount = parseUnits(order.amount.toString(), 6);
+      await offrampClient.removeFunds({
+        depositId: BigInt(order.deposit_id),
+        amount,
+      });
+
+      setToastMessage('Order cancelled! Funds returned to wallet.');
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 3000);
+
+      // Refresh balances and orders
+      fetchAllWalletBalances();
+      fetchOfframpOrders();
+    } catch (error) {
+      console.error('Error cancelling order:', error);
+      setToastMessage(`Cancel failed: ${(error as Error).message}`);
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 4000);
+    } finally {
+      setCancellingOrderId(null);
     }
   };
 
@@ -1918,22 +1981,46 @@ const Dashboard: React.FC = () => {
                             Deposit #{order.deposit_id}
                           </div>
                         </div>
-                        <span style={{
-                          padding: '3px 10px',
-                          borderRadius: '12px',
-                          fontSize: '12px',
-                          fontWeight: 500,
-                          backgroundColor:
-                            order.status === 'pending' ? '#fef3c7' :
-                            order.status === 'active' ? '#dbeafe' :
-                            order.status === 'fulfilled' ? '#d1fae5' : '#f3f4f6',
-                          color:
-                            order.status === 'pending' ? '#92400e' :
-                            order.status === 'active' ? '#1e40af' :
-                            order.status === 'fulfilled' ? '#065f46' : '#6b7280',
-                        }}>
-                          {order.status}
-                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{
+                            padding: '3px 10px',
+                            borderRadius: '12px',
+                            fontSize: '12px',
+                            fontWeight: 500,
+                            backgroundColor:
+                              order.status === 'pending' ? '#fef3c7' :
+                              order.status === 'active' ? '#dbeafe' :
+                              order.status === 'fulfilled' ? '#d1fae5' : '#f3f4f6',
+                            color:
+                              order.status === 'pending' ? '#92400e' :
+                              order.status === 'active' ? '#1e40af' :
+                              order.status === 'fulfilled' ? '#065f46' : '#6b7280',
+                          }}>
+                            {order.status}
+                          </span>
+                          {(order.status === 'active' || order.status === 'pending') && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleCancelOrder(order);
+                              }}
+                              disabled={cancellingOrderId === order.deposit_id}
+                              style={{
+                                padding: '3px 10px',
+                                borderRadius: '12px',
+                                fontSize: '12px',
+                                fontWeight: 500,
+                                backgroundColor: cancellingOrderId === order.deposit_id ? '#f3f4f6' : '#fee2e2',
+                                color: cancellingOrderId === order.deposit_id ? '#999' : '#991b1b',
+                                border: 'none',
+                                cursor: cancellingOrderId === order.deposit_id ? 'not-allowed' : 'pointer',
+                                transition: 'all 0.15s',
+                              }}
+                            >
+                              {cancellingOrderId === order.deposit_id ? 'Cancelling...' : 'Cancel'}
+                            </button>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
