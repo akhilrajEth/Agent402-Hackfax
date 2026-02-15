@@ -2772,19 +2772,49 @@ app.listen(4021);`}</pre>
                   </div>
                 </button>
 
-                {/* Deposit with Card Option */}
+                {/* Deposit with Peer Option */}
                 <button
-                  disabled
+                  onClick={async () => {
+                    try {
+                      const { peerExtensionSdk } = await import('@zkp2p/sdk');
+                      const state = await peerExtensionSdk.getState();
+                      if (state === 'needs_install') {
+                        peerExtensionSdk.openInstallPage();
+                        return;
+                      }
+                      if (state === 'needs_connection') {
+                        await peerExtensionSdk.requestConnection();
+                      }
+                      const walletAddr = getWalletAddress();
+                      peerExtensionSdk.onramp({
+                        referrer: 'Agent402',
+                        callbackUrl: window.location.origin,
+                        inputCurrency: 'USD',
+                        paymentPlatform: 'venmo',
+                        toToken: '8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+                        recipientAddress: walletAddr || undefined,
+                      });
+                    } catch (error) {
+                      console.error('Peer onramp error:', error);
+                    }
+                  }}
                   style={{
                     width: '100%',
-                    backgroundColor: '#f8f9fa',
+                    backgroundColor: '#fff',
                     border: '1px solid #e5e5e5',
                     borderRadius: '12px',
                     padding: '16px',
-                    cursor: 'not-allowed',
+                    cursor: 'pointer',
                     textAlign: 'left',
-                    color: '#999',
-                    opacity: 0.6
+                    transition: 'border-color 0.2s ease, box-shadow 0.2s ease'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.borderColor = '#000';
+                    e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.08)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor = '#e5e5e5';
+                    e.currentTarget.style.boxShadow = 'none';
                   }}
                 >
                   <div style={{
@@ -2795,72 +2825,35 @@ app.listen(4021);`}</pre>
                     <div style={{
                       width: '40px',
                       height: '40px',
-                      backgroundColor: '#ccc',
+                      backgroundColor: '#7C3AED',
                       borderRadius: '8px',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center'
                     }}>
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#999" strokeWidth="2">
-                        <rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect>
-                        <line x1="1" y1="10" x2="23" y2="10"></line>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2">
+                        <path d="M12 2L2 7l10 5 10-5-10-5z" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M2 17l10 5 10-5" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M2 12l10 5 10-5" strokeLinecap="round" strokeLinejoin="round"/>
                       </svg>
                     </div>
                     <div style={{ flex: 1 }}>
                       <div style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '8px',
+                        fontSize: '16px',
+                        fontWeight: '600',
+                        color: '#000',
                         marginBottom: '4px'
                       }}>
-                        <span style={{
-                          fontSize: '16px',
-                          fontWeight: '600',
-                          color: '#999'
-                        }}>
-                          Deposit with Card
-                        </span>
-                        <span style={{
-                          backgroundColor: '#999',
-                          color: '#fff',
-                          fontSize: '10px',
-                          fontWeight: '600',
-                          padding: '2px 6px',
-                          borderRadius: '4px'
-                        }}>
-                          SOON
-                        </span>
+                        Deposit with Peer
                       </div>
                       <div style={{
                         fontSize: '14px',
-                        color: '#999',
+                        color: '#666',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between'
                       }}>
-                        <span>$50,000 limit • 5 min</span>
-                        <div style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '4px'
-                        }}>
-                          <img 
-                            src="/mastercard-icon.png" 
-                            alt="Mastercard" 
-                            style={{
-                              width: '24px',
-                              height: 'auto'
-                            }}
-                          />
-                          <img 
-                            src="/visa-icon.png" 
-                            alt="Visa" 
-                            style={{
-                              width: '24px',
-                              height: '24px'
-                            }}
-                          />
-                        </div>
+                        <span>Venmo, Zelle, Revolut & more</span>
                       </div>
                     </div>
                   </div>
