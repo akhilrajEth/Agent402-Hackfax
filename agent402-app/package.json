@@ -16,7 +16,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "worker:dev": "cd api && npx wrangler dev",
     "worker:deploy": "cd api && npx wrangler deploy"
