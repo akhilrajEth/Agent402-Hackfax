@@ -229,6 +229,11 @@ const Dashboard: React.FC = () => {
         const intentHashes = (dep.intents || []).map((i: any) => i.intentHash);
         const allFulfilled = intentHashes.length > 0 && (dep.intents || []).every((i: any) => i.status === 'FULFILLED');
         const remainingAmount = Number(dep.remainingDeposits || '0') / 1e6;
+        const outstandingAmount = Number(dep.outstandingIntentAmount || '0') / 1e6;
+        const takenAmount = Number(dep.totalAmountTaken || '0') / 1e6;
+        const withdrawnAmount = Number(dep.totalWithdrawn || '0') / 1e6;
+        // Reconstruct original deposit amount from indexer fields
+        const originalAmount = remainingAmount + outstandingAmount + takenAmount + withdrawnAmount;
 
         // Map indexer status — closed with 0 remaining means cancelled/withdrawn
         let status = dep.status === 'ACTIVE' ? 'active' : (remainingAmount === 0 ? 'cancelled' : 'closed');
@@ -239,7 +244,7 @@ const Dashboard: React.FC = () => {
           wallet_address: walletAddr,
           deposit_id: dep.depositId,
           tx_hash: dep.txHash || '',
-          amount: remainingAmount,
+          amount: originalAmount,
           processor: processorName,
           identifier: setting?.identifier || '',
           conversion_rate: rateStr,
@@ -1136,7 +1141,14 @@ const Dashboard: React.FC = () => {
                                 color: '#666',
                                 marginTop: '2px'
                               }}>
-                                {usdcBalance} USDC
+                                {(() => {
+                                  const pendingAmt = offrampOrders
+                                    .filter(o => o.status === 'pending' || o.status === 'active')
+                                    .reduce((sum, o) => sum + (o.amount || 0), 0);
+                                  const walletNum = parseFloat(usdcBalance) || 0;
+                                  const total = walletNum + pendingAmt;
+                                  return pendingAmt > 0 ? `${total.toFixed(2)} USDC (${pendingAmt.toFixed(2)} in deposits)` : `${usdcBalance} USDC`;
+                                })()}
                               </div>
                             </div>
                           </div>
@@ -1345,9 +1357,14 @@ const Dashboard: React.FC = () => {
                 <div style={cardValueStyle}>
                   {isBalanceLoading ? (
                     <span style={{ color: '#999' }}>Loading...</span>
-                  ) : (
-                    `${usdcBalance} USDC`
-                  )}
+                  ) : (() => {
+                    const pendingAmount = offrampOrders
+                      .filter(o => o.status === 'pending' || o.status === 'active')
+                      .reduce((sum, o) => sum + (o.amount || 0), 0);
+                    const walletNum = parseFloat(usdcBalance) || 0;
+                    const totalNum = walletNum + pendingAmount;
+                    return `${totalNum.toFixed(2)} USDC`;
+                  })()}
                 </div>
                 <div style={{ fontSize: '12px', color: '#999', marginTop: '4px' }}>
                   Base network
@@ -1445,6 +1462,46 @@ const Dashboard: React.FC = () => {
                       </div>
                     )}
                     
+                    {/* Pending Withdrawal Deposits */}
+                    {(() => {
+                      const pendingOrders = offrampOrders.filter(o => o.status === 'pending' || o.status === 'active');
+                      const pendingTotal = pendingOrders.reduce((sum, o) => sum + (o.amount || 0), 0);
+                      if (pendingTotal <= 0) return null;
+                      return (
+                        <div style={{
+                          padding: '12px 16px',
+                          borderBottom: '1px solid #f8f9fa',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center'
+                        }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{
+                              fontSize: '13px',
+                              fontWeight: '500',
+                              color: '#000',
+                              marginBottom: '2px'
+                            }}>
+                              In Withdrawal Deposits
+                            </div>
+                            <div style={{
+                              fontSize: '11px',
+                              color: '#666'
+                            }}>
+                              {pendingOrders.length} order{pendingOrders.length > 1 ? 's' : ''} awaiting settlement
+                            </div>
+                          </div>
+                          <div style={{
+                            fontSize: '13px',
+                            fontWeight: '600',
+                            color: '#000'
+                          }}>
+                            {pendingTotal.toFixed(2)} USDC
+                          </div>
+                        </div>
+                      );
+                    })()}
+
                     {/* Embedded Wallet Balance */}
                     {getWalletAddress() && getWalletAddress() !== getWalletAddress() && (
                       <div style={{
@@ -1558,9 +1615,14 @@ const Dashboard: React.FC = () => {
               
               <div style={cardStyle}>
                 <div style={cardTitleStyle}>Total Volume</div>
-                <div style={cardValueStyle}>{totalSpend}</div>
+                <div style={cardValueStyle}>
+                  {offrampOrders
+                    .filter(o => o.status === 'fulfilled')
+                    .reduce((sum, o) => sum + (o.amount || 0), 0)
+                    .toFixed(2)} USDC
+                </div>
                 <div style={{ fontSize: '12px', color: '#999', marginTop: '4px' }}>
-                  Lifetime payments
+                  Fulfilled withdrawals
                 </div>
               </div>
             </div>
